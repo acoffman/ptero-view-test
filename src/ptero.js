@@ -37,10 +37,11 @@ var processWorkflowData = function(skeleton, executions, callingContext) {
     status: skeleton.status,
     name: skeleton.name,
     timestamp: getTimestampForStatusAndHistory(skeleton.status, rootExecution.statusHistory),
+    nestingLevel: 0
   });
 
-  var processedRows = processTasks(skeleton.tasks, indexedExecutions, 0, rows);
-  callingContext.setState({rows: processedRows});
+  processTasks(skeleton.tasks, indexedExecutions, 1, null, rows);
+  callingContext.setState({rows: rows});
 }
 
 var indexExecutions = function(executions) {
@@ -69,11 +70,16 @@ var indexExecutions = function(executions) {
 }
 
 
-var processTasks = function(tasks, indexedExecutions, nestingLevel, rows) {
+var processTasks = function(tasks, indexedExecutions, nestingLevel, color, rows) {
   var sortedTaskKeys = getSortedTaskKeys(tasks);
   sortedTaskKeys.forEach(function (taskKey, index, array) {
-    $.merge(rows, getStatusInfoRowsForTask(taskKey, tasks[taskKey], indexedExecutions.tasks, nestingLevel));
-    processMethods(tasks[taskKey], indexedExecutions, nestingLevel + 1, rows);
+    var task = tasks[taskKey];
+    var executions = indexedExecutions.tasks[task.id];
+    executions.forEach(function(execution, index, array) {
+      if (execution.parentColor == color) {
+        getStatusInfoRowsForTaskExecution(taskKey, task, execution, indexedExecutions, nestingLevel, rows);
+      }
+    });
   });
   return rows;
 }
@@ -84,38 +90,35 @@ var getSortedTaskKeys = function(tasks) {
     });
 }
 
-var getStatusInfoRowsForTask = function(name, task, tasksById, nestingLevel) {
-  var executions = tasksById[task.id];
-  return executions.map(function (execution) {
-    return {
-      name: name,
-      status: execution.status,
-      timestamp: getTimestampForStatusAndHistory(execution.status, execution.statusHistory),
-      nestingLevel: nestingLevel,
-      type: 'task'
-    };
+var getStatusInfoRowsForTaskExecution = function(name, task, execution, indexedExecutions, nestingLevel, rows) {
+  rows.push({
+    name: name,
+    status: execution.status,
+    timestamp: getTimestampForStatusAndHistory(execution.status, execution.statusHistory),
+    nestingLevel: nestingLevel,
+    type: 'task'
   });
+  processMethods(task, execution, indexedExecutions, nestingLevel + 1, rows);
 }
 
-var processMethods = function(task, indexedExecutions, nestingLevel, rows) {
+var processMethods = function(task, execution, indexedExecutions, nestingLevel, rows) {
   task.methods.forEach(function(method, index, methods) {
-    $.merge(rows, getStatusInfoRowsForMethod(method, indexedExecutions.methods, nestingLevel));
-    if (method.service == "workflow") {
-      processTasks(method.parameters.tasks, indexedExecutions, nestingLevel + 1, rows);
-    }
+    getStatusInfoRowsForMethod(method, execution.color, indexedExecutions, nestingLevel, rows);
   });
 }
-
-var getStatusInfoRowsForMethod = function(method, methodsById, nestingLevel) {
-  var executions = methodsById[method.id];
-  return executions.map(function (execution) {
-    return {
+var getStatusInfoRowsForMethod = function(method, color, indexedExecutions, nestingLevel, rows) {
+  var executions = indexedExecutions.methods[method.id];
+  executions.filter(function (e) { return e.parentColor == color; }).forEach(function (execution, index, executions) {
+    rows.push({
       name: method.name,
       status: execution.status,
       timestamp: getTimestampForStatusAndHistory(execution.status, execution.statusHistory),
       nestingLevel: nestingLevel,
       type: method.service,
-    };
+    });
+    if (method.service == "workflow") {
+      processTasks(method.parameters.tasks, indexedExecutions, nestingLevel + 1, execution.color, rows);
+    }
   });
 }
 
@@ -145,13 +148,53 @@ var getClassNameForWorkflowStatus = function(status) {
 }
 
 var spacersForNestingLevel = function(nestingLevel) {
-  var i= nestingLevel;
+  var i = nestingLevel;
   var accum = [];
   while (i > 0) {
     accum.push(<span className="glyphicon glyphicon-arrow-right" aria-hidden={true}/>);
     i--;
   }
   return accum;
+}
+
+var headerForMaxIndent = function(maxIndent) {
+  var i = maxIndent + 4;
+  var accum = [];
+  while (i > 0) {
+    accum.push(<th className="col-md-1"/>);
+    i--;
+  }
+  return accum;
+}
+
+var leadingBlankCellsForRow = function(row) {
+  var i = row.nestingLevel;
+  var accum = [];
+  while (i > 0) {
+    accum.push(<td><span className="glyphicon glyphicon-arrow-right" aria-hidden={true}/></td>);
+    i--;
+  }
+  return accum;
+}
+
+var trailingBlankCellsForRow = function(row, maxIndent) {
+  var i = maxIndent - row.nestingLevel;
+  var accum = [];
+  while (i > 0) {
+    accum.push(<td></td>);
+    i--;
+  }
+  return accum;
+}
+
+var maxIndentForRows = function(rows) {
+  return rows.reduce(function (curMax, row, index, rows) {
+    if (row.nestingLevel > curMax) {
+      return row.nestingLevel
+    } else {
+      return curMax
+    }
+  }, 0);
 }
 
 var iconForItemType = function(type) {
@@ -184,29 +227,27 @@ var WorkflowStatusOverview = React.createClass({
     if(isEmpty) {
       return (<p>Loading...</p>);
     } else {
+
+      var maxIndent = maxIndentForRows(this.state.rows);
+      var tableHeader = headerForMaxIndent(maxIndent);
+
       var tableRows = this.state.rows.map(function(row) {
-        var className = "label label-" + getClassNameForWorkflowStatus(row.status);
-        return (<tr>
+        var bootstrapStatusClass = getClassNameForWorkflowStatus(row.status);
+        var labelClassName = "label label-" + bootstrapStatusClass;
+        var leadingBlankCells = leadingBlankCellsForRow(row);
+        var trailingBlankCells = trailingBlankCellsForRow(row, maxIndent);
+        return (<tr className={bootstrapStatusClass}>
+          {leadingBlankCells}
+          <td>{row.name}</td>
           <td>{iconForItemType(row.type)} {row.type}</td>
-          <td><span className={className}>{row.status}</span></td>
+          <td><span className={labelClassName}>{row.status}</span></td>
           <td>{row.timestamp}</td>
-          <td>{spacersForNestingLevel(row.nestingLevel)} {row.name}</td>
+          {trailingBlankCells}
         </tr>);
       });
-      return (<table className="table table-bordered table-striped">
+      return (<table className="table table-bordered">
         <tr>
-          <th>
-            Type
-          </th>
-          <th>
-            Status
-          </th>
-          <th>
-            Timestamp
-          </th>
-          <th>
-            Name
-          </th>
+          {tableHeader}
         </tr>
         <tbody>
           {tableRows}
